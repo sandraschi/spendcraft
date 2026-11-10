@@ -1,0 +1,5 @@
+# SpendCraft
+
+> Local-first sovereign expense claims, Austrian statutory travel allowances (§26 EStG), and SEPA reimbursement engine in pure Rust.
+
+- [Full LLM Reference](llms-full.txt): Comprehensive tools, architecture, and configuration documentation.

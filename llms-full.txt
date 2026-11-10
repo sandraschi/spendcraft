@@ -1,0 +1,30 @@
+# SpendCraft — Full Technical & LLM Reference
+
+## Architecture Overview
+
+SpendCraft is a local-first enterprise expense management and statutory travel reimbursement engine built in pure Rust. It enforces `#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]` across all crates:
+
+- `spendcraft-store`: SQLite transaction layer with integer money calculations (`Money(i64 cents)`).
+- `spendcraft-core`: Austrian §26 EStG calculation engine (Kilometergeld, Tagesdiäten), ISO 20022 SEPA Credit Transfer (`pain.001`) XML batch builder, and event bus handlers.
+- `spendcraft-mcp`: Stdio JSON-RPC FastMCP server & CLI binary (`spendcraft`).
+- `spendcraft-app`: Native desktop GUI executable (`spendcraft-app`) via `egui 0.37`.
+
+## MCP Tools Reference
+
+1. `spend_status`: Retrieves high-level expense metrics (draft, approved, reimbursed claim totals and pending batches).
+2. `spend_claim_create`: Creates a new expense claim for an employee with receipt references and categories.
+3. `spend_claim_list`: Lists claims filtered by state (`draft`, `approved`, `reimbursed`).
+4. `spend_claim_approve`: Approves a pending claim and marks it ready for SEPA batch execution.
+5. `spend_trip_log`: Records an official business trip and calculates Austrian statutory Kilometergeld and Tagesdiäten (§26 EStG).
+6. `spend_sepa_reimbursement_batch`: Generates an ISO 20022 `pain.001.001.03` batch XML order for approved expense reimbursements.
+
+## Configuration & Environment Variables
+
+- `SPENDCRAFT_DB`: Path to SQLite database file (default: `%LOCALAPPDATA%\spendcraft\spendcraft.db`).
+- `CRAFT_BUS_DIR`: Root directory of atomic event bus (default: `%LOCALAPPDATA%\craft-biz-bus`).
+
+## Event Bus Protocol
+
+- Inbox: `%LOCALAPPDATA%\craft-biz-bus\spendcraft\inbox\`
+  - Handled events: `travel.logged` (from `teamcraft`).
+- Outbox emissions: `expense.approved`, `reimbursement.batched`.
