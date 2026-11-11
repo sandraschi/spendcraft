@@ -11,7 +11,12 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "spendcraft", author, version, about = "Local-first expense & Austrian Reisekosten (§26 EStG) engine. CLI + MCP.")]
+#[command(
+    name = "spendcraft",
+    author,
+    version,
+    about = "Local-first expense & Austrian Reisekosten (§26 EStG) engine. CLI + MCP."
+)]
 struct Cli {
     #[arg(long)]
     db: Option<PathBuf>,
@@ -121,10 +126,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Claims: {}", s.total_claims);
             println!("Total Volume: €{:.2}", s.total_amount_cents as f64 / 100.0);
             println!("Approved: €{:.2}", s.approved_amount_cents as f64 / 100.0);
-            println!("Reimbursed: €{:.2}", s.reimbursed_amount_cents as f64 / 100.0);
+            println!(
+                "Reimbursed: €{:.2}",
+                s.reimbursed_amount_cents as f64 / 100.0
+            );
             println!("Pending Approval: {}", s.pending_approval_count);
         }
-        Commands::Submit { id, employee_id, employee_name, category, amount_cents, tax_cents, iban, notes } => {
+        Commands::Submit {
+            id,
+            employee_id,
+            employee_name,
+            category,
+            amount_cents,
+            tax_cents,
+            iban,
+            notes,
+        } => {
             let today = Local::now().date_naive();
             let c = service.store().submit_claim(
                 &id,
@@ -139,14 +156,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None,
                 notes.as_deref(),
             )?;
-            println!("Submitted expense claim {} for {} (€{:.2})", c.id, c.employee_name, c.amount_cents as f64 / 100.0);
+            println!(
+                "Submitted expense claim {} for {} (€{:.2})",
+                c.id,
+                c.employee_name,
+                c.amount_cents as f64 / 100.0
+            );
         }
         Commands::Show { id } => {
             let c = service.store().get_claim(&id)?;
             println!("Claim: {}", c.id);
             println!("Employee: {} ({})", c.employee_name, c.employee_id);
             println!("Category: {}", c.category);
-            println!("Amount: €{:.2} (Tax: €{:.2})", c.amount_cents as f64 / 100.0, c.tax_cents as f64 / 100.0);
+            println!(
+                "Amount: €{:.2} (Tax: €{:.2})",
+                c.amount_cents as f64 / 100.0,
+                c.tax_cents as f64 / 100.0
+            );
             println!("Status: {:?}", c.status);
             println!("Date: {}", c.claim_date);
             if let Some(n) = c.notes {
@@ -157,27 +183,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let filter = status.as_deref().and_then(ClaimStatus::from_str_opt);
             let claims = service.store().list_claims(filter)?;
             for c in claims {
-                println!("{:14} {:16} {:16} {:10} €{:.2}", c.id, c.employee_name, c.category, c.status.as_str(), c.amount_cents as f64 / 100.0);
+                println!(
+                    "{:14} {:16} {:16} {:10} €{:.2}",
+                    c.id,
+                    c.employee_name,
+                    c.category,
+                    c.status.as_str(),
+                    c.amount_cents as f64 / 100.0
+                );
             }
         }
         Commands::Approve { id } => {
             let c = service.approve_claim(&id)?;
-            println!("Approved claim {} (€{:.2})", c.id, c.amount_cents as f64 / 100.0);
+            println!(
+                "Approved claim {} (€{:.2})",
+                c.id,
+                c.amount_cents as f64 / 100.0
+            );
         }
         Commands::Reject { id, reason } => {
             let c = service.reject_claim(&id, reason.as_deref())?;
             println!("Rejected claim {}", c.id);
         }
-        Commands::CalcDiaeten { hours, free_lunch, free_dinner } => {
+        Commands::CalcDiaeten {
+            hours,
+            free_lunch,
+            free_dinner,
+        } => {
             let cents = SpendStore::calculate_tagesdiaeten(hours, free_lunch, free_dinner);
-            println!("Austrian §26 EStG Tagesdiäten for {:.1}h (Lunch: {}, Dinner: {}): €{:.2}", hours, free_lunch, free_dinner, cents as f64 / 100.0);
+            println!(
+                "Austrian §26 EStG Tagesdiäten for {:.1}h (Lunch: {}, Dinner: {}): €{:.2}",
+                hours,
+                free_lunch,
+                free_dinner,
+                cents as f64 / 100.0
+            );
         }
         Commands::CalcKm { km, vehicle } => {
             let cents = SpendStore::calculate_kilometergeld(km, &vehicle);
-            println!("Austrian §26 EStG Kilometergeld for {:.1}km ({}): €{:.2}", km, vehicle, cents as f64 / 100.0);
+            println!(
+                "Austrian §26 EStG Kilometergeld for {:.1}km ({}): €{:.2}",
+                km,
+                vehicle,
+                cents as f64 / 100.0
+            );
         }
-        Commands::ExportSepa { claim_ids, payer_name, payer_iban, payer_bic } => {
-            let xml = service.store().export_sepa_reimbursement(&claim_ids, &payer_name, &payer_iban, &payer_bic)?;
+        Commands::ExportSepa {
+            claim_ids,
+            payer_name,
+            payer_iban,
+            payer_bic,
+        } => {
+            let xml = service.store().export_sepa_reimbursement(
+                &claim_ids,
+                &payer_name,
+                &payer_iban,
+                &payer_bic,
+            )?;
             println!("{xml}");
         }
         Commands::Stats => {
@@ -186,7 +248,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::InboxDrain => {
             let res = service.drain_inbox()?;
-            println!("Drained {} travel events from inbox. Created: {:?}", res.processed, res.created_claims);
+            println!(
+                "Drained {} travel events from inbox. Created: {:?}",
+                res.processed, res.created_claims
+            );
         }
         Commands::Tools => {
             print_tools_catalog();
@@ -212,7 +277,10 @@ fn print_tools_catalog() {
         { "name": "export_sepa_reimbursement", "description": "Generate ISO 20022 pain.001 credit transfer batch" },
         { "name": "inbox_drain", "description": "Drain travel events from teamcraft to auto-create claims" }
     ]);
-    println!("{}", serde_json::to_string_pretty(&catalog).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&catalog).unwrap_or_default()
+    );
 }
 
 fn run_mcp_server(service: SpendService) -> Result<(), Box<dyn std::error::Error>> {
@@ -262,14 +330,21 @@ fn run_mcp_server(service: SpendService) -> Result<(), Box<dyn std::error::Error
                 stdout.flush()?;
             }
             "tools/call" => {
-                let tool_name = req.get("params").and_then(|p| p.get("name")).and_then(|n| n.as_str()).unwrap_or("");
+                let tool_name = req
+                    .get("params")
+                    .and_then(|p| p.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("");
                 let result_json = match tool_name {
                     "spend_stats" => {
                         let st = service.store().stats().map_err(|e| e.to_string())?;
                         json!(st)
                     }
                     "expense_list" => {
-                        let claims = service.store().list_claims(None).map_err(|e| e.to_string())?;
+                        let claims = service
+                            .store()
+                            .list_claims(None)
+                            .map_err(|e| e.to_string())?;
                         json!(claims)
                     }
                     _ => json!({ "status": "unknown tool" }),
