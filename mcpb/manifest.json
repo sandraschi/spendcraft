@@ -1,0 +1,45 @@
+{
+  "manifest_version": "0.2",
+  "name": "spendcraft",
+  "display_name": "SpendCraft",
+  "version": "__VERSION__",
+  "description": "Native egui desktop application for SpendCraft",
+  "author": {
+    "name": "Sandra Schipal",
+    "url": "https://github.com/sandraschi"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sandraschi/spendcraft"
+  },
+  "license": "MIT OR Apache-2.0",
+  "server": {
+    "type": "binary",
+    "entry_point": "spendcraft.exe",
+    "mcp_config": {
+      "command": "${__dirname}/spendcraft.exe",
+      "args": [
+        "mcp"
+      ]
+    }
+  },
+  "compatibility": {
+    "platforms": [
+      "win32"
+    ]
+  },
+  "tools": [
+    {
+      "name": "spend_stats",
+      "description": "Get spend totals"
+    },
+    {
+      "name": "expense_list",
+      "description": "List expense claims"
+    },
+    {
+      "name": "calc_tagesdiaeten",
+      "description": "Calculate Austrian §26 EStG per diem"
+    }
+  ]
+}
