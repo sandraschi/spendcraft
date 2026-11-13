@@ -4,6 +4,7 @@
 
 use chrono::{Local, NaiveDate};
 use clap::Parser;
+use craft_biz::bus::Bus;
 use craft_biz::Money;
 use craft_biz_ui::bookend::{self, Bar, Spec};
 use craft_biz_ui::menu::Item;
@@ -26,6 +27,16 @@ struct Args {
     db: Option<PathBuf>,
     #[arg(long)]
     dark: bool,
+}
+
+fn resolve_bus() -> Option<Bus> {
+    if let Ok(dir) = std::env::var("CRAFT_BUS_DIR") {
+        return Some(Bus::new(PathBuf::from(dir)));
+    }
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        return Some(Bus::new(PathBuf::from(local).join("craft-biz-bus")));
+    }
+    None
 }
 
 fn resolve_db(path: Option<PathBuf>) -> PathBuf {
@@ -125,7 +136,7 @@ enum ActiveTab {
 }
 
 struct SpendApp {
-    store: SpendStore,
+    service: SpendService,
     db_path: PathBuf,
     settings: UiSettings,
     active_tab: ActiveTab,
@@ -165,6 +176,13 @@ struct SpendApp {
     calc_free_dinner: bool,
     calc_km: f64,
     calc_result: Option<String>,
+    uk_miles: f64,
+    uk_already: f64,
+    uk_passengers: i64,
+    uk_vehicle: String,
+    us_miles: f64,
+    us_date: String,
+    mileage_result: Option<String>,
 
     // SEPA Batch State
     payer_name: String,
@@ -178,10 +196,11 @@ struct SpendApp {
 
 impl SpendApp {
     fn new(store: SpendStore, db_path: PathBuf, dark_cli: bool) -> Self {
-        let claims = store.list_claims(None).unwrap_or_default();
-        let trips = store.list_trips(None).unwrap_or_default();
-        let batches = store.list_batches().unwrap_or_default();
-        let stats = store.stats().unwrap_or(SpendStats {
+        let service = SpendService::new(store, resolve_bus());
+        let claims = service.store().list_claims(None).unwrap_or_default();
+        let trips = service.store().list_trips(None).unwrap_or_default();
+        let batches = service.store().list_batches().unwrap_or_default();
+        let stats = service.store().stats().unwrap_or(SpendStats {
             total_claims: 0,
             total_amount_cents: 0,
             approved_amount_cents: 0,
@@ -198,7 +217,7 @@ impl SpendApp {
         }
 
         Self {
-            store,
+            service,
             db_path,
             settings,
             active_tab: ActiveTab::Claims,
@@ -230,6 +249,13 @@ impl SpendApp {
             calc_free_dinner: false,
             calc_km: 120.0,
             calc_result: None,
+            uk_miles: 100.0,
+            uk_already: 0.0,
+            uk_passengers: 0,
+            uk_vehicle: "car".into(),
+            us_miles: 100.0,
+            us_date: "2026-07-15".into(),
+            mileage_result: None,
             payer_name: "Fleet Sovereign Back-Office GmbH".into(),
             payer_iban: "AT021200000123456789".into(),
             payer_bic: "BAWAGATW".into(),
@@ -249,7 +275,10 @@ impl SpendApp {
             docs: &docs,
             dark: self.settings.dark,
             zoom: self.settings.zoom,
-            file: vec![Item::action("Refresh", "app.refresh")],
+            file: vec![
+                Item::action("Drain inbox", "app.drain"),
+                Item::action("Refresh", "app.refresh"),
+            ],
             view: vec![
                 Item::action("Claims", "view.claims").checked(self.active_tab == ActiveTab::Claims),
                 Item::action("Fahrtenbuch", "view.trips")
@@ -270,6 +299,7 @@ impl SpendApp {
         }
         match change.action.as_deref() {
             Some("app.refresh") => self.refresh(),
+            Some("app.drain") => self.drain_inbox(),
             Some("view.claims") => self.active_tab = ActiveTab::Claims,
             Some("view.trips") => self.active_tab = ActiveTab::Fahrtenbuch,
             Some("view.per_diem") => self.active_tab = ActiveTab::Reisekosten,
@@ -278,21 +308,35 @@ impl SpendApp {
         }
     }
 
+    fn drain_inbox(&mut self) {
+        match self.service.drain_inbox() {
+            Ok(s) => {
+                self.refresh();
+                self.toast(format!(
+                    "Inbox: {} events, {} claims.",
+                    s.processed,
+                    s.created_claims.len()
+                ));
+            }
+            Err(e) => self.toast(e.to_string()),
+        }
+    }
+
     fn toast(&mut self, msg: impl Into<String>) {
         self.toast_msg = Some((msg.into(), std::time::Instant::now()));
     }
 
     fn refresh(&mut self) {
-        if let Ok(cs) = self.store.list_claims(self.filter_status) {
+        if let Ok(cs) = self.service.store().list_claims(self.filter_status) {
             self.claims = cs;
         }
-        if let Ok(ts) = self.store.list_trips(None) {
+        if let Ok(ts) = self.service.store().list_trips(None) {
             self.trips = ts;
         }
-        if let Ok(bs) = self.store.list_batches() {
+        if let Ok(bs) = self.service.store().list_batches() {
             self.batches = bs;
         }
-        if let Ok(st) = self.store.stats() {
+        if let Ok(st) = self.service.store().stats() {
             self.stats = st;
         }
     }
@@ -505,7 +549,7 @@ impl SpendApp {
                     ui.heading(format!("Claim Details: {id}"));
                     ui.add_space(6.0);
 
-                    if let Ok(c) = self.store.get_claim(&id) {
+                    if let Ok(c) = self.service.store().get_claim(&id) {
                         widgets::card(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("Employee:").strong());
@@ -551,17 +595,17 @@ impl SpendApp {
                             ui.separator();
                             ui.horizontal(|ui| {
                                 if ui.button("✓ Approve Claim").clicked() {
-                                    let _ = self.store.update_status(&id, ClaimStatus::Approved);
+                                    let _ = self.service.store().update_status(&id, ClaimStatus::Approved);
                                     self.refresh();
                                     self.toast(format!("Claim {id} approved"));
                                 }
                                 if ui.button("✗ Reject").clicked() {
-                                    let _ = self.store.update_status(&id, ClaimStatus::Rejected);
+                                    let _ = self.service.store().update_status(&id, ClaimStatus::Rejected);
                                     self.refresh();
                                     self.toast(format!("Claim {id} rejected"));
                                 }
                                 if ui.button("💳 Mark Reimbursed").clicked() {
-                                    let _ = self.store.update_status(&id, ClaimStatus::Reimbursed);
+                                    let _ = self.service.store().update_status(&id, ClaimStatus::Reimbursed);
                                     self.refresh();
                                     self.toast(format!("Claim {id} marked reimbursed"));
                                 }
@@ -651,7 +695,7 @@ impl SpendApp {
                                     .unwrap_or((gross, Money::ZERO));
                                 let is_kb = gross.cents() <= 40000;
 
-                                let _ = self.store.submit_claim_extended(
+                                let _ = self.service.store().submit_claim_extended(
                                     &self.new_claim_id,
                                     &self.new_claim_emp_id,
                                     &self.new_claim_emp_name,
@@ -800,7 +844,7 @@ impl SpendApp {
                     ui.add_space(8.0);
                     if ui.button("💾 Record Trip in Fahrtenbuch").clicked() {
                         let trip_id = format!("TRIP-{}", Local::now().format("%Y%m%d%H%M%S"));
-                        let _ = self.store.record_trip(
+                        let _ = self.service.store().record_trip(
                             &trip_id,
                             "EMP-01",
                             "Sandra Schipal",
@@ -858,7 +902,7 @@ impl SpendApp {
                                 }
 
                                 if let Some(id) = delete_trip_id {
-                                    let _ = self.store.delete_trip(&id);
+                                    let _ = self.service.store().delete_trip(&id);
                                     self.refresh();
                                     self.toast(format!("Trip {id} deleted"));
                                 }
@@ -870,7 +914,7 @@ impl SpendApp {
 
     fn render_reisekosten_view(&mut self, ui: &mut egui::Ui) {
         ui.heading("🇦🇹 Austrian Statutory Reisekosten Engine (§26 EStG)");
-        ui.label(RichText::new("Calculates statutory Tagesdiäten (per diems) according to official Austrian BMF tables with meal deductions.").weak());
+        ui.label(RichText::new("Austrian foreign-travel day rates. A GB or US row here is not HMRC subsistence and not GSA per diem. UK mileage is uk-amap-2026 and US mileage is us-irs-mileage-2026, further down.").weak());
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(4.0);
@@ -965,7 +1009,7 @@ impl SpendApp {
                             let total = diaeten + km_geld;
                             let claim_id = format!("EXP-CALC-{}", Local::now().format("%Y%m%d%H%M%S"));
 
-                            let _ = self.store.submit_claim_extended(
+                            let _ = self.service.store().submit_claim_extended(
                                 &claim_id,
                                 "EMP-01",
                                 "Sandra Schipal",
@@ -990,6 +1034,70 @@ impl SpendApp {
                 }
             });
         });
+        ui.add_space(8.0);
+        ui.separator();
+        ui.heading("UK AMAP 2026 and US IRS business mileage 2026");
+        ui.label("These amounts stay in pence or US cents. They are not added to an Austrian euro claim.");
+        ui.horizontal(|ui| {
+            ui.label("UK miles");
+            ui.add(
+                egui::DragValue::new(&mut self.uk_miles)
+                    .range(0.0..=100_000.0)
+                    .speed(1.0),
+            );
+            ui.label("already this tax year");
+            ui.add(
+                egui::DragValue::new(&mut self.uk_already)
+                    .range(0.0..=100_000.0)
+                    .speed(10.0),
+            );
+            ui.label("passengers");
+            ui.add(egui::DragValue::new(&mut self.uk_passengers).range(0..=8));
+            ui.label("vehicle");
+            ui.text_edit_singleline(&mut self.uk_vehicle);
+        });
+        ui.horizontal(|ui| {
+            ui.label("US miles");
+            ui.add(
+                egui::DragValue::new(&mut self.us_miles)
+                    .range(0.0..=100_000.0)
+                    .speed(1.0),
+            );
+            ui.label("trip date");
+            ui.text_edit_singleline(&mut self.us_date);
+            if ui.button("Calculate UK and US mileage").clicked() {
+                self.mileage_result = Some(self.foreign_mileage());
+            }
+        });
+        if let Some(text) = &self.mileage_result {
+            ui.label(text);
+        }
+    }
+
+    fn foreign_mileage(&self) -> String {
+        let uk = match SpendStore::calculate_uk_amap(
+            self.uk_miles,
+            &self.uk_vehicle,
+            self.uk_passengers,
+            self.uk_already,
+        ) {
+            Ok(r) => format!(
+                "{}: {} pence for {} miles. {}",
+                r.ruleset, r.minor_units, self.uk_miles, UK_AMAP_AS_OF
+            ),
+            Err(e) => format!("UK: {e}"),
+        };
+        let us = match NaiveDate::parse_from_str(self.us_date.trim(), "%Y-%m-%d") {
+            Ok(on) => match SpendStore::calculate_us_business_mileage(self.us_miles, on) {
+                Ok(r) => format!(
+                    "{}: {} cents for {} miles on {}. {}",
+                    r.ruleset, r.minor_units, self.us_miles, on, US_IRS_MILEAGE_AS_OF
+                ),
+                Err(e) => format!("US: {e}"),
+            },
+            Err(_) => "US: trip date is YYYY-MM-DD.".into(),
+        };
+        format!("{uk}\n{us}")
     }
 
     fn render_sepa_view(&mut self, ui: &mut egui::Ui) {
@@ -1043,20 +1151,21 @@ impl SpendApp {
                     ui.add_space(8.0);
                     if approved_claims.is_empty() {
                         ui.label(RichText::new("No claims currently in 'Approved' status. Approve claims in Claims Inbox first.").weak());
-                    } else if ui.button(format!("⚡ Generate SEPA pain.001 XML ({} claims, {})", approved_claims.len(), Money::from_cents(total_approved_cents).format_eur())).clicked() {
+                    } else if ui.button(format!("Generate SEPA pain.001 XML ({} claims, {})", approved_claims.len(), Money::from_cents(total_approved_cents).format_eur())).clicked() {
                         let ids: Vec<String> = approved_claims.iter().map(|c| c.id.clone()).collect();
-                        match self.store.export_sepa_reimbursement(&ids, &self.payer_name, &self.payer_iban, &self.payer_bic) {
-                            Ok(xml) => {
-                                for id in &ids {
-                                    let _ = self.store.update_status(id, ClaimStatus::Reimbursed);
-                                }
-                                self.last_exported_xml = Some(xml);
+                        let name = self.payer_name.clone();
+                        let iban = self.payer_iban.clone();
+                        let bic = self.payer_bic.clone();
+                        match self.service.batch_reimburse(&ids, &name, &iban, &bic) {
+                            Ok(batch) => {
+                                self.last_exported_xml = Some(batch.xml_payload);
                                 self.refresh();
-                                self.toast("SEPA XML generated & claims marked Reimbursed!");
+                                self.toast(format!(
+                                    "{} reimbursed {} claims and notified buchcraft and billcraft.",
+                                    batch.batch_id, batch.count
+                                ));
                             }
-                            Err(e) => {
-                                self.toast(format!("Error: {e}"));
-                            }
+                            Err(e) => self.toast(format!("Error: {e}")),
                         }
                     }
                 });
