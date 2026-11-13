@@ -1036,6 +1036,10 @@ impl SpendStore {
     }
 }
 
+fn minor_units(distance: f64, rate: i64) -> i64 {
+    (distance * rate as f64).round() as i64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1088,37 +1092,41 @@ mod tests {
     }
 
     #[test]
-    fn uk_amap_2026_matches_the_published_worked_example() {
+    fn uk_amap_2026_matches_the_published_worked_example() -> Result<(), String> {
         assert!(UK_AMAP_AS_OF.contains("ruleset=uk-amap-2026"));
         assert!(UK_AMAP_AS_OF.contains("55p"));
-        let year = SpendStore::calculate_uk_amap(12_000.0, "car", 0, 0.0).unwrap();
+        let year =
+            SpendStore::calculate_uk_amap(12_000.0, "car", 0, 0.0).map_err(|e| e.to_string())?;
         assert_eq!(year.minor_units, 600_000);
         assert_eq!(year.currency, "GBP");
-        let across = SpendStore::calculate_uk_amap(2_000.0, "van", 0, 9_000.0).unwrap();
+        let across =
+            SpendStore::calculate_uk_amap(2_000.0, "van", 0, 9_000.0).map_err(|e| e.to_string())?;
         assert_eq!(across.minor_units, 80_000);
-        let bike = SpendStore::calculate_uk_amap(10.0, "bicycle", 0, 0.0).unwrap();
+        let bike =
+            SpendStore::calculate_uk_amap(10.0, "bicycle", 0, 0.0).map_err(|e| e.to_string())?;
         assert_eq!(bike.minor_units, 200);
-        let with_passenger = SpendStore::calculate_uk_amap(10.0, "car", 1, 0.0).unwrap();
+        let with_passenger =
+            SpendStore::calculate_uk_amap(10.0, "car", 1, 0.0).map_err(|e| e.to_string())?;
         assert_eq!(with_passenger.minor_units, 600);
         assert!(SpendStore::calculate_uk_amap(10.0, "motorcycle", 1, 0.0).is_err());
+        Ok(())
     }
 
     #[test]
-    fn us_irs_2026_business_mileage_follows_the_july_change() {
+    fn us_irs_2026_business_mileage_follows_the_july_change() -> Result<(), String> {
         assert!(US_IRS_MILEAGE_AS_OF.contains("72.5c"));
         assert!(US_IRS_MILEAGE_AS_OF.contains("76c"));
-        let june = NaiveDate::from_ymd_opt(2026, 6, 30).unwrap();
-        let july = NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
-        let first = SpendStore::calculate_us_business_mileage(100.0, june).unwrap();
+        let june = NaiveDate::from_ymd_opt(2026, 6, 30).ok_or("bad date")?;
+        let july = NaiveDate::from_ymd_opt(2026, 7, 1).ok_or("bad date")?;
+        let first =
+            SpendStore::calculate_us_business_mileage(100.0, june).map_err(|e| e.to_string())?;
         assert_eq!(first.minor_units, 7_250);
         assert_eq!(first.currency, "USD");
-        let second = SpendStore::calculate_us_business_mileage(100.0, july).unwrap();
+        let second =
+            SpendStore::calculate_us_business_mileage(100.0, july).map_err(|e| e.to_string())?;
         assert_eq!(second.minor_units, 7_600);
-        let before = NaiveDate::from_ymd_opt(2025, 12, 31).unwrap();
+        let before = NaiveDate::from_ymd_opt(2025, 12, 31).ok_or("bad date")?;
         assert!(SpendStore::calculate_us_business_mileage(10.0, before).is_err());
+        Ok(())
     }
-}
-
-fn minor_units(distance: f64, rate: i64) -> i64 {
-    (distance * rate as f64).round() as i64
 }
