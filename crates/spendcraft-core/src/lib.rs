@@ -189,7 +189,13 @@ impl SpendService {
         })
     }
 
-    /// Automatically generates expense claims for travel events logged by `teamcraft`
+    /// Turns `travel.logged` into a submitted claim.
+    ///
+    /// Employee, country, and hours or kilometres are required. A missing
+    /// country is not treated as Austria, and a missing duration is not
+    /// treated as 8 hours. The mileage row is `car` (42 c/km) unless the
+    /// event names `car_2026`, `bicycle`, or `motorcycle`. The claim note
+    /// includes [`STATUTORY_RATES_AS_OF`].
     pub fn drain_inbox(&self) -> Result<DrainSummary, SpendCoreError> {
         let mut created = Vec::new();
         let Some(bus) = &self.bus else {
@@ -203,83 +209,141 @@ impl SpendService {
         let processed = events.len();
 
         for ev in events {
-            if ev.kind == "travel.logged" {
-                let emp_id = ev
-                    .payload
-                    .get("employee_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("EMP-01");
-                let emp_name = ev
-                    .payload
-                    .get("employee_name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Team Member");
-                let hours = ev
-                    .payload
-                    .get("hours")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(8.0);
-                let km = ev.payload.get("km").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let free_lunch = ev
-                    .payload
-                    .get("free_lunch")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let free_dinner = ev
-                    .payload
-                    .get("free_dinner")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let country = ev
-                    .payload
-                    .get("country")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("AT");
-
-                let per_diem = SpendStore::calculate_foreign_per_diem(
-                    country,
-                    hours,
-                    false,
-                    free_lunch,
-                    free_dinner,
-                );
-                let mileage = SpendStore::calculate_kilometergeld(km, "car");
-                let total = per_diem + mileage;
-
-                let claim_id = format!("EXP-TRV-{}", Local::now().format("%Y%m%d%H%M%S"));
-                let today = Local::now().date_naive();
-
-                if total > 0 && self.store.get_claim(&claim_id).is_err() {
-                    let _ = self.store.submit_claim_extended(
-                        &claim_id,
-                        emp_id,
-                        emp_name,
-                        None,
-                        "travel_per_diem",
-                        total,
-                        total,
-                        0,
-                        "NONE",
-                        true,
-                        today,
-                        None,
-                        None,
-                        Some(&format!(
-                            "Automated Austrian §26 EStG calculation: {hours}h travel in {country} (€{:.2}), {km}km (€{:.2})",
-                            per_diem as f64 / 100.0,
-                            mileage as f64 / 100.0
-                        )),
-                    );
-                    created.push(claim_id);
+            let outcome = if ev.kind == "travel.logged" {
+                self.apply_travel_logged(&ev.id, &ev.payload)
+            } else {
+                Ok(None)
+            };
+            match outcome {
+                Ok(Some(id)) => {
+                    created.push(id);
+                    bus.ack("spendcraft", &ev.id)?;
                 }
+                Ok(None) => bus.ack("spendcraft", &ev.id)?,
+                Err(error) => bus.reject("spendcraft", &ev.id, &error.to_string())?,
             }
-            let _ = bus.ack("spendcraft", &ev.id);
         }
 
         Ok(DrainSummary {
             processed,
             created_claims: created,
         })
+    }
+
+    fn apply_travel_logged(
+        &self,
+        event_id: &str,
+        payload: &serde_json::Value,
+    ) -> Result<Option<String>, SpendCoreError> {
+        let employee_id = required_str(payload, "employee_id")?;
+        let employee_name = required_str(payload, "employee_name")?;
+        let country = required_str(payload, "country")?;
+        if !BMF_PER_DIEM_RATES
+            .iter()
+            .any(|rate| rate.country_code.eq_ignore_ascii_case(country))
+        {
+            return Err(SpendCoreError::Validation(format!(
+                "no per-diem table for {country}"
+            )));
+        }
+        let hours = optional_f64(payload, "hours")?;
+        let km = optional_f64(payload, "km")?;
+        if hours.is_none() && km.is_none() {
+            return Err(SpendCoreError::Validation("hours or km is required".into()));
+        }
+        let hours = hours.unwrap_or(0.0);
+        let km = km.unwrap_or(0.0);
+        if hours < 0.0 || km < 0.0 {
+            return Err(SpendCoreError::Validation(
+                "hours and km must be zero or positive".into(),
+            ));
+        }
+        let vehicle = match optional_str(payload, "vehicle") {
+            Some(vehicle) if KNOWN_VEHICLES.contains(&vehicle) => vehicle,
+            Some(vehicle) => {
+                return Err(SpendCoreError::Validation(format!(
+                    "unknown vehicle {vehicle}"
+                )));
+            }
+            None => "car",
+        };
+        let free_lunch = optional_bool(payload, "free_lunch")?.unwrap_or(false);
+        let free_dinner = optional_bool(payload, "free_dinner")?.unwrap_or(false);
+
+        let per_diem =
+            SpendStore::calculate_foreign_per_diem(country, hours, false, free_lunch, free_dinner);
+        let mileage = SpendStore::calculate_kilometergeld(km, vehicle);
+        let total = per_diem + mileage;
+        if total <= 0 {
+            return Err(SpendCoreError::Validation(
+                "travel.logged produced no allowance".into(),
+            ));
+        }
+
+        let claim_id = format!("EXP-TRV-{event_id}");
+        if self.store.get_claim(&claim_id).is_ok() {
+            return Ok(None);
+        }
+        let today = Local::now().date_naive();
+        self.store.submit_claim_extended(
+            &claim_id,
+            employee_id,
+            employee_name,
+            None,
+            "travel_per_diem",
+            total,
+            total,
+            0,
+            "NONE",
+            true,
+            today,
+            None,
+            None,
+            Some(&format!(
+                "{STATUTORY_RATES_AS_OF}; {hours}h in {country} ({per_diem}c), {km}km {vehicle} ({mileage}c)"
+            )),
+        )?;
+        Ok(Some(claim_id))
+    }
+}
+
+const KNOWN_VEHICLES: [&str; 4] = ["car", "car_2026", "bicycle", "motorcycle"];
+
+fn required_str<'a>(payload: &'a serde_json::Value, key: &str) -> Result<&'a str, SpendCoreError> {
+    payload
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| SpendCoreError::Validation(format!("{key} is required")))
+}
+
+fn optional_str<'a>(payload: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    payload
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn optional_f64(payload: &serde_json::Value, key: &str) -> Result<Option<f64>, SpendCoreError> {
+    match payload.get(key) {
+        None => Ok(None),
+        Some(value) => value
+            .as_f64()
+            .filter(|number| number.is_finite())
+            .map(Some)
+            .ok_or_else(|| SpendCoreError::Validation(format!("{key} must be a number"))),
+    }
+}
+
+fn optional_bool(payload: &serde_json::Value, key: &str) -> Result<Option<bool>, SpendCoreError> {
+    match payload.get(key) {
+        None => Ok(None),
+        Some(value) => value
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| SpendCoreError::Validation(format!("{key} must be a boolean"))),
     }
 }
 
@@ -323,6 +387,128 @@ mod tests {
         let updated = service.store().get_claim(&claim.id)?;
         assert_eq!(updated.status, ClaimStatus::Reimbursed);
 
+        Ok(())
+    }
+
+    #[test]
+    fn travel_logged_becomes_a_submitted_claim() -> Result<(), String> {
+        let root = std::env::temp_dir().join(format!("spendcraft-travel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        let bus = Bus::new(&root);
+        bus.emit(
+            "teamcraft",
+            "spendcraft",
+            "travel.logged",
+            json!({
+                "employee_id": "EMP-ADA",
+                "employee_name": "Ada",
+                "country": "AT",
+                "hours": 12.0,
+                "km": 10.0
+            }),
+        )
+        .map_err(|e| e.to_string())?;
+        bus.emit(
+            "teamcraft",
+            "spendcraft",
+            "travel.logged",
+            json!({"employee_id": "EMP-ADA"}),
+        )
+        .map_err(|e| e.to_string())?;
+
+        let store = SpendStore::open_in_memory().map_err(|e| e.to_string())?;
+        let service = SpendService::new(store, Some(bus));
+        let summary = service.drain_inbox().map_err(|e| e.to_string())?;
+        if summary.processed != 2 || summary.created_claims.len() != 1 {
+            return Err(format!(
+                "processed {} created {}",
+                summary.processed,
+                summary.created_claims.len()
+            ));
+        }
+        let claim = service
+            .store()
+            .get_claim(&summary.created_claims[0])
+            .map_err(|e| e.to_string())?;
+        if claim.status != ClaimStatus::Submitted || claim.amount_cents != 3060 {
+            return Err(format!("claim {:?} {}", claim.status, claim.amount_cents));
+        }
+        let notes = claim.notes.unwrap_or_default();
+        if !notes.contains("ruleset=at-estg-26") {
+            return Err(notes);
+        }
+        let bus = service.bus().ok_or("bus dropped")?;
+        let pending = bus.pending("spendcraft").map_err(|e| e.to_string())?;
+        if !pending.is_empty() {
+            return Err(format!("inbox still has {}", pending.len()));
+        }
+        let failed = bus
+            .history("spendcraft", craft_biz::bus::EventState::Failed, 10)
+            .map_err(|e| e.to_string())?;
+        if failed.len() != 1 {
+            return Err(format!("failed {}", failed.len()));
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn batch_emits_reimbursement_batched() -> Result<(), String> {
+        let root = std::env::temp_dir().join(format!("spendcraft-batch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        let bus = Bus::new(&root);
+        let store = SpendStore::open_in_memory().map_err(|e| e.to_string())?;
+        let service = SpendService::new(store, Some(bus));
+        service
+            .store()
+            .submit_claim(
+                "CLM-002",
+                "EMP-01",
+                "Ada",
+                Some("AT611904300234573201"),
+                "train_ticket",
+                4500,
+                450,
+                chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap_or_default(),
+                None,
+                None,
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+        service
+            .approve_claim("CLM-002")
+            .map_err(|e| e.to_string())?;
+        let batch = service
+            .batch_reimburse(
+                &["CLM-002".to_string()],
+                "Fleet GmbH",
+                "AT000000000000000001",
+                "BKAUTWWXXXX",
+            )
+            .map_err(|e| e.to_string())?;
+        if batch.total_amount_cents != 4500 {
+            return Err(format!("total {}", batch.total_amount_cents));
+        }
+        let bus = service.bus().ok_or("bus dropped")?;
+        for app in ["buchcraft", "billcraft"] {
+            let pending = bus.pending(app).map_err(|e| e.to_string())?;
+            let batched = pending
+                .iter()
+                .find(|event| event.kind == "reimbursement.batched");
+            let Some(batched) = batched else {
+                return Err(format!("{app} has no reimbursement.batched"));
+            };
+            let total = batched
+                .payload
+                .get("total_amount_cents")
+                .and_then(serde_json::Value::as_i64);
+            if total != Some(4500) {
+                return Err(format!("{app} total {total:?}"));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }
 }

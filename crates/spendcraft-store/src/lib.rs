@@ -201,6 +201,32 @@ pub const BMF_PER_DIEM_RATES: &[PerDiemRates] = &[
     },
 ];
 
+/// Which statutory table this binary was compiled with.
+///
+/// Domestic Tagesdiäten in [`BMF_PER_DIEM_RATES`] are €26.40 from 11 hours and
+/// €2.20 per started hour from 3 hours. `car` is 42 cents/km. `car_2026` is
+/// 50 cents/km and is not the default. This repository does not store a BMF
+/// Verordnung date for either figure. Confirm the year before a filing.
+pub const STATUTORY_RATES_AS_OF: &str =
+    "compiled-undated; ruleset=at-estg-26; car=42c/km; car_2026=50c/km; AT-day=2640c";
+
+/// HMRC approved mileage allowance payments for tax year 2026 to 2027.
+/// Read from GOV.UK on 13 November 2026. Miles, not kilometres.
+pub const UK_AMAP_AS_OF: &str = "checked=2026-11-13; ruleset=uk-amap-2026; source=gov.uk/expenses-and-benefits-business-travel-mileage/rules-for-tax; from=2026-04-06; car-van=55p/mile first 10000 then 25p; motorcycle=24p; bicycle=20p; passenger=5p car-van only";
+
+/// IRS business standard mileage rate for calendar year 2026.
+/// Read from irs.gov on 13 November 2026. Miles, not kilometres.
+/// Charity and medical rates are a different table and are not in this function.
+pub const US_IRS_MILEAGE_AS_OF: &str = "checked=2026-11-13; ruleset=us-irs-mileage-2026; source=irs.gov/tax-professionals/standard-mileage-rates; through=2026-06-30 business=72.5c/mile IR-2025-128; from=2026-07-01 business=76c/mile IR-2026-29";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MileageResult {
+    pub ruleset: &'static str,
+    pub minor_units: i64,
+    pub currency: &'static str,
+    pub unit: &'static str,
+}
+
 pub struct SpendStore {
     conn: Connection,
 }
@@ -699,12 +725,12 @@ impl SpendStore {
         })
     }
 
-    /// Austrian §26 Z4 EStG Kilometergeld: calculates official tax-free mileage compensation.
-    /// Base rates:
-    /// - Car standard: 42 c/km (or 50 c/km under 2025/2026 reform)
-    /// - Bicycle: 40 c/km
-    /// - Motorcycle: 24 c/km
-    /// - Passenger surcharge: +5 c/km per transported passenger
+    /// Austrian §26 Z 4 Kilometergeld, in cents.
+    ///
+    /// See [`STATUTORY_RATES_AS_OF`]. `car` is 42 c/km. `car_2026` is 50 c/km
+    /// and is not selected unless the caller names it. Bicycle is 40 c/km,
+    /// motorcycle is 24 c/km, and each passenger adds 5 c/km. An unknown
+    /// vehicle uses the `car` row.
     pub fn calculate_kilometergeld(km: f64, vehicle: &str) -> i64 {
         let (rate, allowance) = Self::calculate_trip_allowance(km, vehicle, 0);
         let _ = rate;
@@ -723,6 +749,96 @@ impl SpendStore {
         let total_rate_cents = base_rate_cents + passenger_surcharge;
         let total_allowance = (km * total_rate_cents as f64).round() as i64;
         (total_rate_cents, total_allowance)
+    }
+
+    /// HMRC approved mileage for tax year 2026 to 2027, in pence.
+    ///
+    /// `miles_already` is business miles of that vehicle class already paid
+    /// in the same tax year. The 10,000-mile step is on the year, not the trip.
+    /// A passenger payment is 5p per mile and only for a car or van.
+    /// See [`UK_AMAP_AS_OF`].
+    pub fn calculate_uk_amap(
+        miles: f64,
+        vehicle: &str,
+        passengers: i64,
+        miles_already: f64,
+    ) -> Result<MileageResult, SpendStoreError> {
+        if miles < 0.0 || miles_already < 0.0 || passengers < 0 {
+            return Err(SpendStoreError::Validation(
+                "miles, miles already claimed, and passengers must be zero or more".into(),
+            ));
+        }
+        let class = match vehicle {
+            "car" | "van" => "car",
+            "motorcycle" => "motorcycle",
+            "bicycle" | "cycle" => "bicycle",
+            other => {
+                return Err(SpendStoreError::Validation(format!(
+                    "uk-amap-2026 has no vehicle {other}"
+                )))
+            }
+        };
+        if passengers > 0 && class != "car" {
+            return Err(SpendStoreError::Validation(
+                "a passenger payment applies to a car or van only".into(),
+            ));
+        }
+        let pence = match class {
+            "car" => {
+                let room = (10_000.0 - miles_already).max(0.0);
+                let at_first = miles.min(room);
+                let at_rest = miles - at_first;
+                minor_units(at_first, 55)
+                    + minor_units(at_rest, 25)
+                    + minor_units(miles, passengers * 5)
+            }
+            "motorcycle" => minor_units(miles, 24),
+            _ => minor_units(miles, 20),
+        };
+        Ok(MileageResult {
+            ruleset: "uk-amap-2026",
+            minor_units: pence,
+            currency: "GBP",
+            unit: "mile",
+        })
+    }
+
+    /// IRS business standard mileage for a 2026 trip date, in cents.
+    ///
+    /// 72.5 cents per mile through 30 June 2026, then 76 cents. A half-cent
+    /// rounds away from zero. A date outside 2026 is rejected. See [`US_IRS_MILEAGE_AS_OF`].
+    pub fn calculate_us_business_mileage(
+        miles: f64,
+        on: NaiveDate,
+    ) -> Result<MileageResult, SpendStoreError> {
+        if miles < 0.0 {
+            return Err(SpendStoreError::Validation(
+                "miles must be zero or more".into(),
+            ));
+        }
+        let Some(year_start) = NaiveDate::from_ymd_opt(2026, 1, 1) else {
+            return Err(SpendStoreError::Validation("bad date".into()));
+        };
+        let Some(second_half) = NaiveDate::from_ymd_opt(2026, 7, 1) else {
+            return Err(SpendStoreError::Validation("bad date".into()));
+        };
+        let Some(year_end) = NaiveDate::from_ymd_opt(2026, 12, 31) else {
+            return Err(SpendStoreError::Validation("bad date".into()));
+        };
+        if on < year_start || on > year_end {
+            return Err(SpendStoreError::Validation(
+                "us-irs-mileage-2026 covers trip dates in 2026 only".into(),
+            ));
+        }
+        let mills_per_mile: i64 = if on < second_half { 725 } else { 760 };
+        let mills = (miles * mills_per_mile as f64).round() as i64;
+        let cents = if mills >= 0 { (mills + 5) / 10 } else { 0 };
+        Ok(MileageResult {
+            ruleset: "us-irs-mileage-2026",
+            minor_units: cents,
+            currency: "USD",
+            unit: "mile",
+        })
     }
 
     /// Austrian §26 Z4 EStG Tagesdiäten (Domestic Business Trips):
@@ -926,9 +1042,14 @@ mod tests {
 
     #[test]
     fn test_austrian_estg_calculations() {
-        // Kilometergeld
+        assert!(STATUTORY_RATES_AS_OF.contains("compiled-undated"));
+        assert!(STATUTORY_RATES_AS_OF.contains("ruleset=at-estg-26"));
+        assert!(STATUTORY_RATES_AS_OF.contains("car=42c/km"));
+
+        // Kilometergeld. The default car row is 42 c/km. car_2026 is a separate row.
         let km_cents = SpendStore::calculate_kilometergeld(100.0, "car");
-        assert_eq!(km_cents, 4200); // 42.00 EUR
+        assert_eq!(km_cents, 4200);
+        assert_eq!(SpendStore::calculate_kilometergeld(100.0, "car_2026"), 5000);
 
         // Tagesdiäten full day
         let diaeten_full = SpendStore::calculate_tagesdiaeten(12.0, false, false);
@@ -965,4 +1086,39 @@ mod tests {
         let ch_full = SpendStore::calculate_foreign_per_diem("CH", 12.0, false, false, false);
         assert_eq!(ch_full, 4240);
     }
+
+    #[test]
+    fn uk_amap_2026_matches_the_published_worked_example() {
+        assert!(UK_AMAP_AS_OF.contains("ruleset=uk-amap-2026"));
+        assert!(UK_AMAP_AS_OF.contains("55p"));
+        let year = SpendStore::calculate_uk_amap(12_000.0, "car", 0, 0.0).unwrap();
+        assert_eq!(year.minor_units, 600_000);
+        assert_eq!(year.currency, "GBP");
+        let across = SpendStore::calculate_uk_amap(2_000.0, "van", 0, 9_000.0).unwrap();
+        assert_eq!(across.minor_units, 80_000);
+        let bike = SpendStore::calculate_uk_amap(10.0, "bicycle", 0, 0.0).unwrap();
+        assert_eq!(bike.minor_units, 200);
+        let with_passenger = SpendStore::calculate_uk_amap(10.0, "car", 1, 0.0).unwrap();
+        assert_eq!(with_passenger.minor_units, 600);
+        assert!(SpendStore::calculate_uk_amap(10.0, "motorcycle", 1, 0.0).is_err());
+    }
+
+    #[test]
+    fn us_irs_2026_business_mileage_follows_the_july_change() {
+        assert!(US_IRS_MILEAGE_AS_OF.contains("72.5c"));
+        assert!(US_IRS_MILEAGE_AS_OF.contains("76c"));
+        let june = NaiveDate::from_ymd_opt(2026, 6, 30).unwrap();
+        let july = NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
+        let first = SpendStore::calculate_us_business_mileage(100.0, june).unwrap();
+        assert_eq!(first.minor_units, 7_250);
+        assert_eq!(first.currency, "USD");
+        let second = SpendStore::calculate_us_business_mileage(100.0, july).unwrap();
+        assert_eq!(second.minor_units, 7_600);
+        let before = NaiveDate::from_ymd_opt(2025, 12, 31).unwrap();
+        assert!(SpendStore::calculate_us_business_mileage(10.0, before).is_err());
+    }
+}
+
+fn minor_units(distance: f64, rate: i64) -> i64 {
+    (distance * rate as f64).round() as i64
 }

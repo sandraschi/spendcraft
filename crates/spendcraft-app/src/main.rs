@@ -5,6 +5,8 @@
 use chrono::{Local, NaiveDate};
 use clap::Parser;
 use craft_biz::Money;
+use craft_biz_ui::bookend::{self, Bar, Spec};
+use craft_biz_ui::menu::Item;
 use craft_biz_ui::shell::UiSettings;
 use craft_biz_ui::theme::{self, Tone};
 use craft_biz_ui::widgets;
@@ -83,6 +85,7 @@ fn run_smoke_checks() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Claim submission cents mismatch".into());
     }
 
+    bookend::smoke("SpendCraft", env!("CARGO_PKG_VERSION"), "expenses")?;
     println!("smoke: ok (spendcraft-app)");
     Ok(())
 }
@@ -170,6 +173,7 @@ struct SpendApp {
     last_exported_xml: Option<String>,
 
     toast_msg: Option<(String, std::time::Instant)>,
+    bar: Bar,
 }
 
 impl SpendApp {
@@ -231,6 +235,46 @@ impl SpendApp {
             payer_bic: "BAWAGATW".into(),
             last_exported_xml: None,
             toast_msg: None,
+            bar: Bar::new(),
+        }
+    }
+
+    fn paint_menu(&mut self, ui: &mut egui::Ui) {
+        let docs = bookend::repo_docs(env!("CARGO_MANIFEST_DIR"));
+        let spec = Spec {
+            name: "SpendCraft",
+            version: env!("CARGO_PKG_VERSION"),
+            description: "Expense claims, mileage, and per diem.",
+            repository: "https://github.com/sandraschi/spendcraft",
+            docs: &docs,
+            dark: self.settings.dark,
+            zoom: self.settings.zoom,
+            file: vec![Item::action("Refresh", "app.refresh")],
+            view: vec![
+                Item::action("Claims", "view.claims").checked(self.active_tab == ActiveTab::Claims),
+                Item::action("Fahrtenbuch", "view.trips")
+                    .checked(self.active_tab == ActiveTab::Fahrtenbuch),
+                Item::action("Per diem", "view.per_diem")
+                    .checked(self.active_tab == ActiveTab::Reisekosten),
+                Item::action("SEPA batches", "view.sepa")
+                    .checked(self.active_tab == ActiveTab::SepaBatches),
+            ],
+            middle: Vec::new(),
+        };
+        let change = self.bar.show(ui, &spec);
+        if let Some(dark) = change.dark {
+            self.settings.dark = dark;
+        }
+        if let Some(zoom) = change.zoom {
+            self.settings.zoom = zoom;
+        }
+        match change.action.as_deref() {
+            Some("app.refresh") => self.refresh(),
+            Some("view.claims") => self.active_tab = ActiveTab::Claims,
+            Some("view.trips") => self.active_tab = ActiveTab::Fahrtenbuch,
+            Some("view.per_diem") => self.active_tab = ActiveTab::Reisekosten,
+            Some("view.sepa") => self.active_tab = ActiveTab::SepaBatches,
+            _ => {}
         }
     }
 
@@ -256,6 +300,7 @@ impl SpendApp {
 
 impl eframe::App for SpendApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.paint_menu(ui);
         theme::apply(ui.ctx(), self.settings.dark);
 
         // Top navigation & branding header

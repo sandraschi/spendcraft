@@ -2,7 +2,7 @@
 #![deny(clippy::expect_used)]
 #![deny(clippy::panic)]
 
-use chrono::Local;
+use chrono::{Local, NaiveDate};
 use clap::{Parser, Subcommand};
 use craft_biz::bus::Bus;
 use serde_json::json;
@@ -67,6 +67,22 @@ enum Commands {
         km: f64,
         #[arg(long, default_value = "car")]
         vehicle: String,
+    },
+    /// HMRC approved mileage for tax year 2026 to 2027. Miles, in pence.
+    CalcUk {
+        miles: f64,
+        #[arg(long, default_value = "car")]
+        vehicle: String,
+        #[arg(long, default_value_t = 0.0)]
+        miles_already: f64,
+        #[arg(long, default_value_t = 0)]
+        passengers: i64,
+    },
+    /// IRS business mileage for a 2026 trip date. Miles, in cents.
+    CalcUs {
+        miles: f64,
+        /// Trip date, YYYY-MM-DD. The rate changes on 1 July 2026.
+        date: String,
     },
     ExportSepa {
         claim_ids: Vec<String>,
@@ -228,6 +244,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cents as f64 / 100.0
             );
         }
+        Commands::CalcUk {
+            miles,
+            vehicle,
+            miles_already,
+            passengers,
+        } => {
+            let result = SpendStore::calculate_uk_amap(miles, &vehicle, passengers, miles_already)?;
+            println!(
+                "HMRC uk-amap-2026 for {miles} miles ({vehicle}): £{:.2}",
+                result.minor_units as f64 / 100.0
+            );
+        }
+        Commands::CalcUs { miles, date } => {
+            let on = NaiveDate::parse_from_str(&date, "%Y-%m-%d")?;
+            let result = SpendStore::calculate_us_business_mileage(miles, on)?;
+            println!(
+                "IRS us-irs-mileage-2026 for {miles} miles on {date}: ${:.2}",
+                result.minor_units as f64 / 100.0
+            );
+        }
         Commands::ExportSepa {
             claim_ids,
             payer_name,
@@ -274,6 +310,8 @@ fn print_tools_catalog() {
         { "name": "expense_list", "description": "List claims filtered by status" },
         { "name": "calc_tagesdiaeten", "description": "Calculate Austrian §26 EStG statutory per diem" },
         { "name": "calc_kilometergeld", "description": "Calculate Austrian §26 EStG statutory mileage" },
+        { "name": "calc_uk_amap", "description": "HMRC approved mileage for tax year 2026 to 2027, in pence per mile" },
+        { "name": "calc_us_business_mileage", "description": "IRS business standard mileage for a 2026 trip date, in cents per mile" },
         { "name": "export_sepa_reimbursement", "description": "Generate ISO 20022 pain.001 credit transfer batch" },
         { "name": "inbox_drain", "description": "Drain travel events from teamcraft to auto-create claims" }
     ]);
@@ -322,7 +360,9 @@ fn run_mcp_server(service: SpendService) -> Result<(), Box<dyn std::error::Error
                         "tools": [
                             { "name": "spend_stats", "description": "Get spend totals", "inputSchema": { "type": "object" } },
                             { "name": "expense_list", "description": "List expense claims", "inputSchema": { "type": "object" } },
-                            { "name": "calc_tagesdiaeten", "description": "Calculate Austrian §26 EStG per diem", "inputSchema": { "type": "object", "properties": { "hours": { "type": "number" } }, "required": ["hours"] } }
+                            { "name": "calc_tagesdiaeten", "description": "Calculate Austrian §26 EStG per diem", "inputSchema": { "type": "object", "properties": { "hours": { "type": "number" } }, "required": ["hours"] } },
+                            { "name": "calc_uk_amap", "description": "HMRC approved mileage, tax year 2026 to 2027", "inputSchema": { "type": "object", "properties": { "miles": { "type": "number" }, "vehicle": { "type": "string" }, "miles_already": { "type": "number" }, "passengers": { "type": "integer" } }, "required": ["miles"] } },
+                            { "name": "calc_us_business_mileage", "description": "IRS business mileage for a 2026 date", "inputSchema": { "type": "object", "properties": { "miles": { "type": "number" }, "date": { "type": "string" } }, "required": ["miles", "date"] } }
                         ]
                     }
                 });
@@ -346,6 +386,47 @@ fn run_mcp_server(service: SpendService) -> Result<(), Box<dyn std::error::Error
                             .list_claims(None)
                             .map_err(|e| e.to_string())?;
                         json!(claims)
+                    }
+                    "calc_uk_amap" => {
+                        let args = req.get("params").and_then(|p| p.get("arguments"));
+                        let miles = args
+                            .and_then(|a| a.get("miles"))
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0);
+                        let vehicle = args
+                            .and_then(|a| a.get("vehicle"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("car");
+                        let already = args
+                            .and_then(|a| a.get("miles_already"))
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0);
+                        let passengers = args
+                            .and_then(|a| a.get("passengers"))
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
+                        match SpendStore::calculate_uk_amap(miles, vehicle, passengers, already) {
+                            Ok(result) => json!(result),
+                            Err(err) => json!({ "error": err.to_string() }),
+                        }
+                    }
+                    "calc_us_business_mileage" => {
+                        let args = req.get("params").and_then(|p| p.get("arguments"));
+                        let miles = args
+                            .and_then(|a| a.get("miles"))
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0);
+                        let date = args
+                            .and_then(|a| a.get("date"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        match NaiveDate::parse_from_str(date, "%Y-%m-%d") {
+                            Ok(on) => match SpendStore::calculate_us_business_mileage(miles, on) {
+                                Ok(result) => json!(result),
+                                Err(err) => json!({ "error": err.to_string() }),
+                            },
+                            Err(err) => json!({ "error": err.to_string() }),
+                        }
                     }
                     _ => json!({ "status": "unknown tool" }),
                 };

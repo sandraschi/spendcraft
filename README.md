@@ -1,5 +1,10 @@
 # SpendCraft 💳
 
+![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)
+![Rust 1.90+](https://img.shields.io/badge/rust-1.90%2B-orange?logo=rust)
+![MCP stdio](https://img.shields.io/badge/MCP-stdio-purple)
+![ArtCraft harness](https://img.shields.io/badge/ArtCraft-harness-green)
+
 **Local-first sovereign expense claims, Austrian statutory travel allowances (§26 EStG), and SEPA reimbursement engine.**
 
 Part of the Sovereign Back-Office Suite replacing SaaS spend with zero-cloud-dependency, instant, offline-capable Rust native applications and companion dashboards.
@@ -10,7 +15,9 @@ Part of the Sovereign Back-Office Suite replacing SaaS spend with zero-cloud-dep
   - **Fahrtenbuch (Audit-Compliant Logbook)**: Complete departure/arrival tracking, origin/destination routes, vehicle classes (PKW €0.42/km, 2026 reform €0.50/km, Bicycle €0.40/km, Motorcycle €0.24/km), and statutory passenger surcharges (*Mitbeförderungszuschlag* +€0.05/km).
   - **Tagesdiäten (Domestic & BMF Foreign Per Diems)**:
     - Domestic (AT): €26.40 full-day, pro-rated €2.20/hour for trips > 3 hours.
-    - Foreign (BMF Auslandsreisesätze): DE (€35.30), CH (€42.40), IT (€36.00), GB (€40.00), CZ (€32.00), HU (€29.00), US (€52.00).
+    - Foreign (BMF Auslandsreisesätze, Austrian rules for a trip abroad): DE (€35.30), CH (€42.40), IT (€36.00), GB (€40.00), CZ (€32.00), HU (€29.00), US (€52.00).
+  - **United Kingdom, own mileage table** (`uk-amap-2026`, from 6 April 2026): car or van 55p per mile for the first 10,000 business miles in the tax year, then 25p. Motorcycle 24p. Bicycle 20p. Passenger 5p per mile in a car or van. `spendcraft calc-uk`.
+  - **United States, own business mileage table** (`us-irs-mileage-2026`): 72.5 cents per mile through 30 June 2026, 76 cents from 1 July 2026. `spendcraft calc-us <miles> <YYYY-MM-DD>`.
     - Statutory deductions for provided meals: breakfast (15%), lunch (50%), dinner (50%).
 - **Austrian VAT / UStG Compliance**:
   - Input VAT split: `U20` (20%), `U10` (10%), `U13` (13%), `NONE` (0% / exempt).

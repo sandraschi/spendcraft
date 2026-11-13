@@ -1,5 +1,5 @@
 ---
-updated: 2026-11-11T01:18:00+01:00
+updated: 2026-11-13T02:00:00+01:00
 agent: antigravity
 status: completed
 tags: [spendcraft, expenses, travel, fahrtenbuch, estg, kilometergeld, sepa, craft-biz, webapp]
@@ -24,4 +24,5 @@ tags: [spendcraft, expenses, travel, fahrtenbuch, estg, kilometergeld, sepa, cra
 - Verified `npm run build` in `spendcraft/webapp` compiles cleanly.
 
 ## Next Step
-- Pilot live run with Sandra's real receipts and export test `pain.001.001.03` XML batch into George banking.
+- BillCraft XRechnung stays a skeleton until a schematron fixture passes.
+- A UK or US subsistence table is still open. The new mileage functions are mileage only.
