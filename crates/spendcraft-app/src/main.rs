@@ -195,6 +195,10 @@ struct SpendApp {
 }
 
 impl SpendApp {
+    fn lang_de(&self) -> bool {
+        self.settings.lang != "en"
+    }
+
     fn new(store: SpendStore, db_path: PathBuf, dark_cli: bool) -> Self {
         let service = SpendService::new(store, resolve_bus());
         let claims = service.store().list_claims(None).unwrap_or_default();
@@ -275,18 +279,26 @@ impl SpendApp {
             docs: &docs,
             dark: self.settings.dark,
             zoom: self.settings.zoom,
+            lang_de: self.lang_de(),
             file: vec![
-                Item::action("Drain inbox", "app.drain"),
-                Item::action("Refresh", "app.refresh"),
+                Item::action(
+                    bookend::t(self.lang_de(), "Eingang abholen", "Drain inbox"),
+                    "app.drain",
+                ),
+                Item::action(bookend::t(self.lang_de(), "Aktualisieren", "Refresh"), "app.refresh"),
             ],
             view: vec![
-                Item::action("Claims", "view.claims").checked(self.active_tab == ActiveTab::Claims),
+                Item::action(bookend::t(self.lang_de(), "Belege", "Claims"), "view.claims")
+                    .checked(self.active_tab == ActiveTab::Claims),
                 Item::action("Fahrtenbuch", "view.trips")
                     .checked(self.active_tab == ActiveTab::Fahrtenbuch),
-                Item::action("Per diem", "view.per_diem")
+                Item::action(bookend::t(self.lang_de(), "Taggeld", "Per diem"), "view.per_diem")
                     .checked(self.active_tab == ActiveTab::Reisekosten),
-                Item::action("SEPA batches", "view.sepa")
-                    .checked(self.active_tab == ActiveTab::SepaBatches),
+                Item::action(
+                    bookend::t(self.lang_de(), "SEPA-Stapel", "SEPA batches"),
+                    "view.sepa",
+                )
+                .checked(self.active_tab == ActiveTab::SepaBatches),
             ],
             middle: Vec::new(),
         };
@@ -296,6 +308,9 @@ impl SpendApp {
         }
         if let Some(zoom) = change.zoom {
             self.settings.zoom = zoom;
+        }
+        if let Some(lang_de) = change.lang_de {
+            self.settings.lang = if lang_de { "de" } else { "en" }.into();
         }
         match change.action.as_deref() {
             Some("app.refresh") => self.refresh(),
@@ -500,7 +515,7 @@ impl SpendApp {
         ui.columns(2, |cols| {
             // Left: Claims Table
             cols[0].vertical(|ui| {
-                ui.heading("Claims Registry");
+                ui.heading(bookend::t(self.lang_de(), "Belegliste", "Claims Registry"));
                 ui.add_space(4.0);
 
                 egui::ScrollArea::vertical().id_salt("claims_scroll").max_height(480.0).show(ui, |ui| {
@@ -546,7 +561,10 @@ impl SpendApp {
             // Right: Claim Inspector
             cols[1].vertical(|ui| {
                 if let Some(id) = self.selected_claim.clone() {
-                    ui.heading(format!("Claim Details: {id}"));
+                    ui.heading(format!(
+                        "{} {id}",
+                        bookend::t(self.lang_de(), "Beleg:", "Claim Details:")
+                    ));
                     ui.add_space(6.0);
 
                     if let Ok(c) = self.service.store().get_claim(&id) {
@@ -756,7 +774,11 @@ impl SpendApp {
         ui.columns(2, |cols| {
             // Left: Log Trip Form
             cols[0].vertical(|ui| {
-                ui.heading("Log Business Trip (§26 Z4 EStG)");
+                ui.heading(bookend::t(
+                    self.lang_de(),
+                    "Dienstreise erfassen (§26 Z4 EStG)",
+                    "Log Business Trip (§26 Z4 EStG)",
+                ));
                 ui.label(
                     RichText::new("Complies with statutory Austrian Fahrtenbuch requirements.")
                         .weak(),
@@ -868,7 +890,7 @@ impl SpendApp {
 
             // Right: Trips Log Table
             cols[1].vertical(|ui| {
-                ui.heading("Fahrtenbuch Registry");
+                ui.heading(bookend::t(self.lang_de(), "Fahrtenbuch", "Fahrtenbuch Registry"));
                 ui.add_space(4.0);
 
                 egui::ScrollArea::vertical()
@@ -913,7 +935,11 @@ impl SpendApp {
     }
 
     fn render_reisekosten_view(&mut self, ui: &mut egui::Ui) {
-        ui.heading("🇦🇹 Austrian Statutory Reisekosten Engine (§26 EStG)");
+        ui.heading(bookend::t(
+            self.lang_de(),
+            "🇦🇹 Reisekosten nach §26 EStG",
+            "🇦🇹 Austrian Statutory Reisekosten Engine (§26 EStG)",
+        ));
         ui.label(RichText::new("Austrian foreign-travel day rates. A GB or US row here is not HMRC subsistence and not GSA per diem. UK mileage is uk-amap-2026 and US mileage is us-irs-mileage-2026, further down.").weak());
         ui.add_space(8.0);
         ui.separator();
@@ -922,7 +948,7 @@ impl SpendApp {
         ui.columns(2, |cols| {
             cols[0].vertical(|ui| {
                 widgets::card(ui, |ui| {
-                    ui.heading("Travel Parameters");
+                    ui.heading(bookend::t(self.lang_de(), "Reiseparameter", "Travel Parameters"));
                     ui.add_space(4.0);
 
                     ui.horizontal(|ui| {
@@ -992,7 +1018,7 @@ impl SpendApp {
                 let summary_opt = self.calc_result.clone();
                 if let Some(res) = summary_opt {
                     widgets::card(ui, |ui| {
-                        ui.heading("Calculation Summary");
+                        ui.heading(bookend::t(self.lang_de(), "Berechnung", "Calculation Summary"));
                         ui.add_space(6.0);
                         ui.label(RichText::new(&res).color(Color32::from_rgb(46, 204, 113)).strong().size(15.0));
                         ui.add_space(8.0);
@@ -1036,7 +1062,11 @@ impl SpendApp {
         });
         ui.add_space(8.0);
         ui.separator();
-        ui.heading("UK AMAP 2026 and US IRS business mileage 2026");
+        ui.heading(bookend::t(
+            self.lang_de(),
+            "UK AMAP 2026 und US-IRS-Kilometergeld 2026",
+            "UK AMAP 2026 and US IRS business mileage 2026",
+        ));
         ui.label("These amounts stay in pence or US cents. They are not added to an Austrian euro claim.");
         ui.horizontal(|ui| {
             ui.label("UK miles");
@@ -1101,7 +1131,11 @@ impl SpendApp {
     }
 
     fn render_sepa_view(&mut self, ui: &mut egui::Ui) {
-        ui.heading("💳 ISO 20022 SEPA Credit Transfer Generator (`pain.001.001.03`)");
+        ui.heading(bookend::t(
+            self.lang_de(),
+            "💳 SEPA-Überweisung (`pain.001.001.03`)",
+            "💳 ISO 20022 SEPA Credit Transfer Generator (`pain.001.001.03`)",
+        ));
         ui.label(RichText::new("Generates bank-compliant XML batch payment orders for George (Erste Bank), ELBA (Raiffeisen), or Bank Austria.").weak());
         ui.add_space(8.0);
         ui.separator();
@@ -1133,7 +1167,11 @@ impl SpendApp {
 
         ui.columns(2, |cols| {
             cols[0].vertical(|ui| {
-                ui.heading("Payer Account Configuration");
+                ui.heading(bookend::t(
+                    self.lang_de(),
+                    "Auftraggeberkonto",
+                    "Payer Account Configuration",
+                ));
                 widgets::card(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label("Payer Name:");
@@ -1172,7 +1210,7 @@ impl SpendApp {
             });
 
             cols[1].vertical(|ui| {
-                ui.heading("SEPA XML Preview");
+                ui.heading(bookend::t(self.lang_de(), "SEPA-XML-Vorschau", "SEPA XML Preview"));
                 let xml_opt = self.last_exported_xml.clone();
                 if let Some(xml) = xml_opt {
                     if ui.button("📋 Copy XML to Clipboard").clicked() {
