@@ -344,7 +344,7 @@ fn run_mcp_server(service: SpendService) -> Result<(), Box<dyn std::error::Error
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": {
-                        "protocolVersion": "2024-11-05",
+                        "protocolVersion": "2026-07-28",
                         "serverInfo": { "name": "spendcraft-mcp", "version": "0.1.0" },
                         "capabilities": { "tools": {} }
                     }
