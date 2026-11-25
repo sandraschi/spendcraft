@@ -339,6 +339,7 @@ impl SpendApp {
     }
 
     pub fn render_embedded(&mut self, ui: &mut egui::Ui) {
+        self.settings.dark = ui.visuals().dark_mode;
         self.render_body(ui, false);
     }
 
@@ -346,37 +347,36 @@ impl SpendApp {
         if standalone {
             self.paint_menu(ui);
             theme::apply(ui.ctx(), self.settings.dark);
-        }
 
-        // Top navigation & branding header
-        ui.horizontal(|ui| {
-            ui.heading(
-                RichText::new("SpendCraft")
-                    .strong()
-                    .color(Color32::from_rgb(243, 156, 18)),
-            );
-            ui.separator();
-            ui.label(RichText::new("Sovereign Austrian Expense & Reisekosten (§26 EStG)").weak());
+            // Top navigation & branding header (standalone only; host suite renders its own header)
+            ui.horizontal(|ui| {
+                ui.heading(
+                    RichText::new("SpendCraft")
+                        .strong()
+                        .color(Color32::from_rgb(243, 156, 18)),
+                );
+                ui.separator();
+                ui.label(RichText::new("Sovereign Austrian Expense & Reisekosten (§26 EStG)").weak());
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if standalone
-                    && ui
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
                         .button(if self.settings.dark {
                             "Light"
                         } else {
                             "Dark"
                         })
                         .clicked()
-                {
-                    self.settings.dark = !self.settings.dark;
-                }
-                if ui.button("Refresh").clicked() {
-                    self.refresh();
-                    self.toast("Refreshed data store");
-                }
+                    {
+                        self.settings.dark = !self.settings.dark;
+                    }
+                    if ui.button("Refresh").clicked() {
+                        self.refresh();
+                        self.toast("Refreshed data store");
+                    }
+                });
             });
-        });
-        ui.add_space(6.0);
+            ui.add_space(6.0);
+        }
 
         // View Tabs
         ui.horizontal(|ui| {
@@ -396,6 +396,14 @@ impl SpendApp {
             tab_button(ui, ActiveTab::Fahrtenbuch, "Fahrtenbuch (Trips)");
             tab_button(ui, ActiveTab::Reisekosten, "§26 EStG Engine");
             tab_button(ui, ActiveTab::SepaBatches, "SEPA pain.001 Batches");
+            if !standalone {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Refresh").clicked() {
+                        self.refresh();
+                        self.toast("Refreshed data store");
+                    }
+                });
+            }
         });
         ui.add_space(8.0);
         ui.separator();
