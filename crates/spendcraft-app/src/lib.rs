@@ -28,6 +28,94 @@ pub fn default_db() -> PathBuf {
     resolve_db(None)
 }
 
+/// Seed realistic Austrian expense claims and a Fahrtenbuch trip into `path`
+/// if no claims exist yet. Safe to call repeatedly (idempotent).
+pub fn seed_demo_at(path: &std::path::Path) -> Result<usize, String> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let store = SpendStore::open(path).map_err(|e| e.to_string())?;
+    let existing = store.list_claims(None).map_err(|e| e.to_string())?;
+    if !existing.is_empty() {
+        return Ok(0);
+    }
+    let today = Local::now().date_naive();
+    store
+        .submit_claim_extended(
+            "EXP-2026-001",
+            "EMP-01",
+            "Sandra Schipal",
+            Some("AT021200000123456789"),
+            "Travel & Subsistence",
+            14800,
+            12333,
+            2467,
+            "U20",
+            false,
+            today,
+            Some("OEBB Railjet + Hotel Linz"),
+            None,
+            Some("DEMO: Client architecture workshop in Linz"),
+        )
+        .map_err(|e| e.to_string())?;
+    store
+        .submit_claim_extended(
+            "EXP-2026-002",
+            "EMP-02",
+            "Lukas Gruber",
+            Some("AT483200000012345864"),
+            "travel_per_diem",
+            2640,
+            2640,
+            0,
+            "NONE",
+            true,
+            today,
+            Some("BMF Tagesdiaeten (12h Inland)"),
+            None,
+            Some("DEMO: Statutory Austrian per diem §26 Z4 EStG"),
+        )
+        .map_err(|e| e.to_string())?;
+    store
+        .submit_claim_extended(
+            "EXP-2026-003",
+            "EMP-03",
+            "Miriam Hofer",
+            Some("AT611904300234573201"),
+            "Software & Cloud",
+            9600,
+            8000,
+            1600,
+            "U20",
+            false,
+            today,
+            Some("Hetzner Cloud EU"),
+            None,
+            Some("DEMO: Monthly staging infrastructure"),
+        )
+        .map_err(|e| e.to_string())?;
+    let _ = store.update_status("EXP-2026-003", ClaimStatus::Approved);
+    store
+        .record_trip(
+            "TRIP-2026-001",
+            "EMP-01",
+            "Sandra Schipal",
+            today,
+            Some("08:30"),
+            Some("17:45"),
+            "Wien (Buero)",
+            "Linz (Kunde)",
+            "DEMO: Projekt-Kickoff & System-Audit",
+            "car",
+            None,
+            None,
+            184.0,
+            1,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(4)
+}
+
 pub fn resolve_db(path: Option<PathBuf>) -> PathBuf {
     if let Some(p) = path {
         return p;
@@ -512,130 +600,172 @@ impl SpendApp {
         });
         ui.add_space(8.0);
 
-        // Split view: Left table, Right inspector
-        ui.columns(2, |cols| {
-            // Left: Claims Table
-            cols[0].vertical(|ui| {
-                ui.heading(bookend::t(self.lang_de(), "Belegliste", "Claims Registry"));
-                ui.add_space(4.0);
+        // Split view on wide screens; stacked full-width on <= 1200px so the 7-column
+        // claims table never spills into the right-hand inspector pane.
+        let render_table = |this: &mut Self, ui: &mut egui::Ui| {
+            ui.heading(bookend::t(this.lang_de(), "Belegliste", "Claims Registry"));
+            ui.add_space(4.0);
 
-                egui::ScrollArea::vertical().id_salt("claims_scroll").max_height(480.0).show(ui, |ui| {
-                    egui::Grid::new("claims_grid").striped(true).min_col_width(80.0).show(ui, |ui| {
-                        ui.label(RichText::new("ID").strong());
-                        ui.label(RichText::new("Employee").strong());
-                        ui.label(RichText::new("Category").strong());
-                        ui.label(RichText::new("Tax Key").strong());
-                        ui.label(RichText::new("Gross").strong());
-                        ui.label(RichText::new("Status").strong());
-                        ui.label(RichText::new("Action").strong());
-                        ui.end_row();
-
-                        let mut selected_id = None;
-                        for c in &self.claims {
-                            ui.label(&c.id);
-                            ui.label(&c.employee_name);
-                            ui.label(&c.category);
-                            ui.label(&c.tax_key);
-                            ui.label(Money::from_cents(c.amount_cents).format_eur());
-
-                            let (tone, txt) = match c.status {
-                                ClaimStatus::Approved => (Tone::Ok, "approved"),
-                                ClaimStatus::Reimbursed => (Tone::Info, "reimbursed"),
-                                ClaimStatus::Rejected => (Tone::Danger, "rejected"),
-                                ClaimStatus::Submitted => (Tone::Warn, "submitted"),
-                            };
-                            widgets::pill(ui, txt, tone);
-
-                            if ui.button("Review").clicked() {
-                                selected_id = Some(c.id.clone());
-                            }
+            egui::ScrollArea::both()
+                .id_salt("claims_scroll")
+                .max_height(260.0)
+                .show(ui, |ui| {
+                    egui::Grid::new("claims_grid")
+                        .striped(true)
+                        .min_col_width(64.0)
+                        .show(ui, |ui| {
+                            ui.label(RichText::new("ID").strong());
+                            ui.label(RichText::new("Employee").strong());
+                            ui.label(RichText::new("Category").strong());
+                            ui.label(RichText::new("Tax Key").strong());
+                            ui.label(RichText::new("Gross").strong());
+                            ui.label(RichText::new("Status").strong());
+                            ui.label(RichText::new("Action").strong());
                             ui.end_row();
-                        }
 
-                        if let Some(id) = selected_id {
-                            self.selected_claim = Some(id);
-                        }
-                    });
-                });
-            });
-
-            // Right: Claim Inspector
-            cols[1].vertical(|ui| {
-                if let Some(id) = self.selected_claim.clone() {
-                    ui.heading(format!(
-                        "{} {id}",
-                        bookend::t(self.lang_de(), "Beleg:", "Claim Details:")
-                    ));
-                    ui.add_space(6.0);
-
-                    if let Ok(c) = self.service.store().get_claim(&id) {
-                        widgets::card(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("Employee:").strong());
-                                ui.label(format!("{} ({})", c.employee_name, c.employee_id));
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("IBAN:").strong());
-                                ui.label(c.employee_iban.as_deref().unwrap_or("No IBAN specified"));
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("Category:").strong());
+                            let mut selected_id = None;
+                            for c in &this.claims {
+                                ui.label(&c.id);
+                                ui.label(&c.employee_name);
                                 ui.label(&c.category);
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("Date:").strong());
-                                ui.label(c.claim_date.to_string());
-                            });
-                            ui.separator();
+                                ui.label(&c.tax_key);
+                                ui.label(Money::from_cents(c.amount_cents).format_eur());
 
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("Gross Amount:").size(16.0).strong());
-                                ui.label(RichText::new(Money::from_cents(c.amount_cents).format_eur()).size(16.0).color(Color32::from_rgb(46, 204, 113)).strong());
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("Net:");
-                                ui.label(Money::from_cents(c.net_cents).format_eur());
-                                ui.separator();
-                                ui.label("VAT Tax:");
-                                ui.label(format!("{} ({})", Money::from_cents(c.tax_cents).format_eur(), c.tax_key));
-                            });
+                                let (tone, txt) = match c.status {
+                                    ClaimStatus::Approved => (Tone::Ok, "approved"),
+                                    ClaimStatus::Reimbursed => (Tone::Info, "reimbursed"),
+                                    ClaimStatus::Rejected => (Tone::Danger, "rejected"),
+                                    ClaimStatus::Submitted => (Tone::Warn, "submitted"),
+                                };
+                                widgets::pill(ui, txt, tone);
 
-                            if c.is_kleinbetragsrechnung {
-                                widgets::pill(ui, "Kleinbetragsrechnung (§11 Abs 6 UStG < €400)", Tone::Info);
+                                if ui.button("Review").clicked() {
+                                    selected_id = Some(c.id.clone());
+                                }
+                                ui.end_row();
                             }
 
-                            if let Some(n) = &c.notes {
-                                ui.add_space(4.0);
-                                ui.label(RichText::new("Notes / Business Justification:").strong());
-                                ui.label(n);
+                            if let Some(id) = selected_id {
+                                this.selected_claim = Some(id);
                             }
-
-                            ui.add_space(8.0);
-                            ui.separator();
-                            ui.horizontal(|ui| {
-                                if ui.button("Approve Claim").clicked() {
-                                    let _ = self.service.store().update_status(&id, ClaimStatus::Approved);
-                                    self.refresh();
-                                    self.toast(format!("Claim {id} approved"));
-                                }
-                                if ui.button("Reject").clicked() {
-                                    let _ = self.service.store().update_status(&id, ClaimStatus::Rejected);
-                                    self.refresh();
-                                    self.toast(format!("Claim {id} rejected"));
-                                }
-                                if ui.button("Mark Reimbursed").clicked() {
-                                    let _ = self.service.store().update_status(&id, ClaimStatus::Reimbursed);
-                                    self.refresh();
-                                    self.toast(format!("Claim {id} marked reimbursed"));
-                                }
-                            });
                         });
-                    }
-                } else {
-                    widgets::empty_state(ui, "No Claim Selected", "Select any claim from the table on the left to audit receipt, VAT tax split, and approve payout.");
+                });
+        };
+
+        let render_inspector = |this: &mut Self, ui: &mut egui::Ui| {
+            if let Some(id) = this.selected_claim.clone() {
+                ui.heading(format!(
+                    "{} {id}",
+                    bookend::t(this.lang_de(), "Beleg:", "Claim Details:")
+                ));
+                ui.add_space(6.0);
+
+                if let Ok(c) = this.service.store().get_claim(&id) {
+                    widgets::card(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Employee:").strong());
+                            ui.label(format!("{} ({})", c.employee_name, c.employee_id));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("IBAN:").strong());
+                            ui.label(c.employee_iban.as_deref().unwrap_or("No IBAN specified"));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Category:").strong());
+                            ui.label(&c.category);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Date:").strong());
+                            ui.label(c.claim_date.to_string());
+                        });
+                        ui.separator();
+
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Gross Amount:").size(16.0).strong());
+                            ui.label(
+                                RichText::new(Money::from_cents(c.amount_cents).format_eur())
+                                    .size(16.0)
+                                    .color(Color32::from_rgb(46, 204, 113))
+                                    .strong(),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Net:");
+                            ui.label(Money::from_cents(c.net_cents).format_eur());
+                            ui.separator();
+                            ui.label("VAT Tax:");
+                            ui.label(format!(
+                                "{} ({})",
+                                Money::from_cents(c.tax_cents).format_eur(),
+                                c.tax_key
+                            ));
+                        });
+
+                        if c.is_kleinbetragsrechnung {
+                            widgets::pill(
+                                ui,
+                                "Kleinbetragsrechnung (§11 Abs 6 UStG < €400)",
+                                Tone::Info,
+                            );
+                        }
+
+                        if let Some(n) = &c.notes {
+                            ui.add_space(4.0);
+                            ui.label(RichText::new("Notes / Business Justification:").strong());
+                            ui.label(n);
+                        }
+
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui.button("Approve Claim").clicked() {
+                                let _ = this
+                                    .service
+                                    .store()
+                                    .update_status(&id, ClaimStatus::Approved);
+                                this.refresh();
+                                this.toast(format!("Claim {id} approved"));
+                            }
+                            if ui.button("Reject").clicked() {
+                                let _ = this
+                                    .service
+                                    .store()
+                                    .update_status(&id, ClaimStatus::Rejected);
+                                this.refresh();
+                                this.toast(format!("Claim {id} rejected"));
+                            }
+                            if ui.button("Mark Reimbursed").clicked() {
+                                let _ = this
+                                    .service
+                                    .store()
+                                    .update_status(&id, ClaimStatus::Reimbursed);
+                                this.refresh();
+                                this.toast(format!("Claim {id} marked reimbursed"));
+                            }
+                        });
+                    });
                 }
+            } else {
+                widgets::empty_state(
+                    ui,
+                    "No Claim Selected",
+                    "Select any claim from the table above to audit receipt, VAT tax split, and approve payout.",
+                );
+            }
+        };
+
+        if ui.available_width() >= 1200.0 {
+            ui.columns(2, |cols| {
+                cols[0].vertical(|ui| render_table(self, ui));
+                cols[1].vertical(|ui| render_inspector(self, ui));
             });
-        });
+        } else {
+            render_table(self, ui);
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(6.0);
+            render_inspector(self, ui);
+        }
 
         // New Claim Modal
         if self.show_new_claim_modal {
