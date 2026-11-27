@@ -6,6 +6,7 @@ use chrono::{Local, NaiveDate};
 use craft_biz::bus::Bus;
 use craft_biz::Money;
 use craft_biz_ui::bookend::{self, Bar, Spec};
+use craft_biz_ui::kanban::{self, Board, Card, Column};
 use craft_biz_ui::menu::Item;
 use craft_biz_ui::shell::UiSettings;
 use craft_biz_ui::theme::{self, Tone};
@@ -243,6 +244,7 @@ pub struct SpendApp {
 
     toast_msg: Option<(String, std::time::Instant)>,
     bar: Bar,
+    show_kanban: bool,
 }
 
 impl SpendApp {
@@ -317,6 +319,7 @@ impl SpendApp {
             last_exported_xml: None,
             toast_msg: None,
             bar: Bar::new(),
+            show_kanban: false,
         }
     }
 
@@ -336,15 +339,24 @@ impl SpendApp {
                     bookend::t(self.lang_de(), "Eingang abholen", "Drain inbox"),
                     "app.drain",
                 ),
-                Item::action(bookend::t(self.lang_de(), "Aktualisieren", "Refresh"), "app.refresh"),
+                Item::action(
+                    bookend::t(self.lang_de(), "Aktualisieren", "Refresh"),
+                    "app.refresh",
+                ),
             ],
             view: vec![
-                Item::action(bookend::t(self.lang_de(), "Belege", "Claims"), "view.claims")
-                    .checked(self.active_tab == ActiveTab::Claims),
+                Item::action(
+                    bookend::t(self.lang_de(), "Belege", "Claims"),
+                    "view.claims",
+                )
+                .checked(self.active_tab == ActiveTab::Claims),
                 Item::action("Fahrtenbuch", "view.trips")
                     .checked(self.active_tab == ActiveTab::Fahrtenbuch),
-                Item::action(bookend::t(self.lang_de(), "Taggeld", "Per diem"), "view.per_diem")
-                    .checked(self.active_tab == ActiveTab::Reisekosten),
+                Item::action(
+                    bookend::t(self.lang_de(), "Taggeld", "Per diem"),
+                    "view.per_diem",
+                )
+                .checked(self.active_tab == ActiveTab::Reisekosten),
                 Item::action(
                     bookend::t(self.lang_de(), "SEPA-Stapel", "SEPA batches"),
                     "view.sepa",
@@ -444,15 +456,13 @@ impl SpendApp {
                         .color(Color32::from_rgb(243, 156, 18)),
                 );
                 ui.separator();
-                ui.label(RichText::new("Sovereign Austrian Expense & Reisekosten (§26 EStG)").weak());
+                ui.label(
+                    RichText::new("Sovereign Austrian Expense & Reisekosten (§26 EStG)").weak(),
+                );
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
-                        .button(if self.settings.dark {
-                            "Light"
-                        } else {
-                            "Dark"
-                        })
+                        .button(if self.settings.dark { "Light" } else { "Dark" })
                         .clicked()
                     {
                         self.settings.dark = !self.settings.dark;
@@ -576,10 +586,17 @@ impl SpendApp {
         ui.add_space(4.0);
 
         // Action & Filter Bar
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button("+ Log New Claim").clicked() {
                 self.show_new_claim_modal = true;
                 self.new_claim_id = format!("EXP-{}", Local::now().format("%Y%m%d%H%M"));
+            }
+            ui.separator();
+            if ui.selectable_label(!self.show_kanban, "Table").clicked() {
+                self.show_kanban = false;
+            }
+            if ui.selectable_label(self.show_kanban, "Kanban Board").clicked() {
+                self.show_kanban = true;
             }
             ui.separator();
             ui.label("Filter Status:");
@@ -599,6 +616,68 @@ impl SpendApp {
             filter_btn(ui, Some(ClaimStatus::Rejected), "Rejected");
         });
         ui.add_space(8.0);
+
+        if self.show_kanban {
+            let columns = vec![
+                Column::new("submitted", "Submitted", Tone::Warn),
+                Column::new("approved", "Approved", Tone::Ok),
+                Column::new("reimbursed", "Reimbursed", Tone::Info),
+                Column::new("rejected", "Rejected", Tone::Danger),
+            ];
+            let cards: Vec<Card> = self
+                .claims
+                .iter()
+                .map(|c| {
+                    let (col, accent) = match c.status {
+                        ClaimStatus::Submitted => ("submitted", Tone::Warn),
+                        ClaimStatus::Approved => ("approved", Tone::Ok),
+                        ClaimStatus::Reimbursed => ("reimbursed", Tone::Info),
+                        ClaimStatus::Rejected => ("rejected", Tone::Danger),
+                    };
+                    Card {
+                        id: c.id.clone(),
+                        column: col.into(),
+                        lane: String::new(),
+                        key: c.id.clone(),
+                        title: format!("{} - {}", c.employee_name, c.category),
+                        tags: Vec::new(),
+                        accent,
+                        badge: Some((Money::from_cents(c.amount_cents).format_eur(), accent)),
+                        assignee: Some(c.employee_name.clone()),
+                        meta: vec![c.claim_date.to_string(), c.tax_key.clone()],
+                        blocked: None,
+                        done: c.status == ClaimStatus::Reimbursed,
+                    }
+                })
+                .collect();
+            let events = Board::new("spendcraft_claims_board", &columns, &cards)
+                .add_buttons(false)
+                .selected(self.selected_claim.as_deref())
+                .show(ui);
+            for ev in events {
+                match ev {
+                    kanban::Event::Select(id) | kanban::Event::Open(id) => {
+                        self.selected_claim = Some(id);
+                    }
+                    kanban::Event::Moved { card, to, from, .. } if to != from => {
+                        let st = match to.as_str() {
+                            "submitted" => Some(ClaimStatus::Submitted),
+                            "approved" => Some(ClaimStatus::Approved),
+                            "reimbursed" => Some(ClaimStatus::Reimbursed),
+                            "rejected" => Some(ClaimStatus::Rejected),
+                            _ => None,
+                        };
+                        if let Some(status) = st {
+                            let _ = self.service.store().update_status(&card, status);
+                            self.refresh();
+                            self.toast(format!("Claim {card} -> {to}"));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            ui.add_space(8.0);
+        }
 
         // Split view on wide screens; stacked full-width on <= 1200px so the 7-column
         // claims table never spills into the right-hand inspector pane.
@@ -919,15 +998,18 @@ impl SpendApp {
                 widgets::card(ui, |ui| {
                     ui.horizontal(|ui| {
                         let lbl = ui.label("Origin:");
-                        ui.text_edit_singleline(&mut self.new_trip_origin).labelled_by(lbl.id);
+                        ui.text_edit_singleline(&mut self.new_trip_origin)
+                            .labelled_by(lbl.id);
                     });
                     ui.horizontal(|ui| {
                         let lbl = ui.label("Destination:");
-                        ui.text_edit_singleline(&mut self.new_trip_dest).labelled_by(lbl.id);
+                        ui.text_edit_singleline(&mut self.new_trip_dest)
+                            .labelled_by(lbl.id);
                     });
                     ui.horizontal(|ui| {
                         let lbl = ui.label("Business Purpose:");
-                        ui.text_edit_singleline(&mut self.new_trip_purpose).labelled_by(lbl.id);
+                        ui.text_edit_singleline(&mut self.new_trip_purpose)
+                            .labelled_by(lbl.id);
                     });
                     ui.horizontal(|ui| {
                         let lbl = ui.label("Vehicle:");
@@ -1025,7 +1107,11 @@ impl SpendApp {
 
             // Right: Trips Log Table
             cols[1].vertical(|ui| {
-                ui.heading(bookend::t(self.lang_de(), "Fahrtenbuch", "Fahrtenbuch Registry"));
+                ui.heading(bookend::t(
+                    self.lang_de(),
+                    "Fahrtenbuch",
+                    "Fahrtenbuch Registry",
+                ));
                 ui.add_space(4.0);
 
                 egui::ScrollArea::vertical()
